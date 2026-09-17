@@ -13,10 +13,10 @@ authors = [{ name = "DevGram" }]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/firedragoq/DevGramBuilder"
-Repository = "https://github.com/firedragoq/DevGramBuilder.git"
-Documentation = "https://github.com/firedragoq/DevGram/blob/update-12.10.1/docs/DEVGRAM_PLUGIN_SDK.md"
-Issues = "https://github.com/firedragoq/DevGramBuilder/issues"
+Homepage = "https://docs.devgram.space/docs/builder"
+Repository = "https://github.com/DevGramOfficial/DevGramBuilder.git"
+Documentation = "https://docs.devgram.space/docs/builder"
+Issues = "https://github.com/DevGramOfficial/DevGramBuilder/issues"
 
 [project.scripts]
 dgb = "devgram_builder.cli:main"

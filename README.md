@@ -1,6 +1,6 @@
 # DevGramBuilder
 
-[![Tests](https://github.com/firedragoq/DevGramBuilder/actions/workflows/tests.yml/badge.svg)](https://github.com/firedragoq/DevGramBuilder/actions/workflows/tests.yml)
+[![Tests](https://github.com/DevGramOfficial/DevGramBuilder/actions/workflows/tests.yml/badge.svg)](https://github.com/DevGramOfficial/DevGramBuilder/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
 
@@ -16,7 +16,7 @@ Dev Server. Результат собирается в нативный форм
 Из отдельного репозитория:
 
 ```bash
-python -m pip install --upgrade "git+https://github.com/firedragoq/DevGramBuilder.git"
+python -m pip install --upgrade "git+https://github.com/DevGramOfficial/DevGramBuilder.git"
 dgb --version
 ```
 
@@ -25,7 +25,7 @@ dgb --version
 Для локальной разработки Builder:
 
 ```bash
-git clone https://github.com/firedragoq/DevGramBuilder.git
+git clone https://github.com/DevGramOfficial/DevGramBuilder.git
 cd DevGramBuilder
 python -m pip install -e .
 ```
@@ -86,7 +86,7 @@ my-plugin/
 - `wheels/` — локальные Python-зависимости в формате `.whl`.
 
 Полный справочник по API плагинов находится в
-[DevGram Plugin SDK](https://github.com/firedragoq/DevGram/blob/update-12.10.1/docs/DEVGRAM_PLUGIN_SDK.md).
+[DevGram Plugin SDK](https://docs.devgram.space/docs/introduction).
 
 ## Разработка
 
