@@ -4,6 +4,7 @@ import argparse
 import ast
 import fnmatch
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -13,7 +14,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +28,7 @@ STATE_DIR = ".devgrambuilder"
 STATE_CONFIG = "config.json"
 BUILDS_DIR = "builds"
 DEV_SERVER_PORT = 42690
+PROTECTED_SOURCES_PATH = ".devgram/protected-sources.zip"
 PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 DEFAULT_IGNORES = [
@@ -228,7 +229,7 @@ def _source_hash(path: Path) -> str:
 
 
 def _compile_sources(root: Path, files: dict[str, Path], state: dict, level: int, reset: bool,
-                     verbose: bool) -> tuple[dict[str, bytes | Path], dict]:
+                     verbose: bool, protect_sources: bool = False) -> tuple[dict[str, bytes | Path], dict]:
     command = _python311()
     if command is None:
         raise BuilderError("для -c нужен Python 3.11 (на Windows: py -3.11)")
@@ -238,7 +239,8 @@ def _compile_sources(root: Path, files: dict[str, Path], state: dict, level: int
         shutil.rmtree(cache_dir)
     cache = _json_load(manifest_path) if manifest_path.exists() else {}
     new_cache: dict[str, dict] = {}
-    ignore = [str(x) for x in state.get("compilationIgnore", [])]
+    # Защищённая сборка не должна случайно оставить часть исходников открытой.
+    ignore = [] if protect_sources else [str(x) for x in state.get("compilationIgnore", [])]
     output: dict[str, bytes | Path] = {}
     compiled = cached = 0
     for archive_name, path in files.items():
@@ -315,9 +317,13 @@ def _zip_write(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     archive.writestr(info, data)
 
 
-def _open_archive(path: Path, encryption: list[str] | tuple[str, str] | None):
-    if not encryption:
-        return zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED)
+def _protected_sources(files: dict[str, Path], encryption: list[str] | tuple[str, str]) -> bytes:
+    """Создать AES-контейнер с оригинальными Python-исходниками.
+
+    Внешний ``.dgplugin`` остаётся обычным ZIP и устанавливается без пароля.
+    DevGram запускает ``.pyc``, а пароль нужен только инструменту, который
+    восстанавливает точные авторские ``.py`` из этого вложенного контейнера.
+    """
     method, password = encryption
     strengths = {"aes-128": 128, "aes-192": 192, "aes-256": 256}
     if method not in strengths:
@@ -328,10 +334,16 @@ def _open_archive(path: Path, encryption: list[str] | tuple[str, str] | None):
         import pyzipper
     except ImportError as error:
         raise BuilderError("для шифрования установите pyzipper: pip install pyzipper") from error
-    archive = pyzipper.AESZipFile(path, "w", compression=pyzipper.ZIP_DEFLATED)
-    archive.setpassword(password.encode("utf-8"))
-    archive.setencryption(pyzipper.WZ_AES, nbits=strengths[method])
-    return archive
+    source_files = {name: path for name, path in files.items() if name.endswith(".py")}
+    if not source_files:
+        raise BuilderError("в проекте нет Python-исходников для защиты")
+    stream = io.BytesIO()
+    with pyzipper.AESZipFile(stream, "w", compression=pyzipper.ZIP_DEFLATED) as archive:
+        archive.setpassword(password.encode("utf-8"))
+        archive.setencryption(pyzipper.WZ_AES, nbits=strengths[method])
+        for name in sorted(source_files):
+            _zip_write(archive, name, source_files[name].read_bytes())
+    return stream.getvalue()
 
 
 def _increment_stat(root: Path, key: str) -> None:
@@ -346,13 +358,17 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
     config = _json_load(root / CONFIG_NAME)
     state = _state(root)
     files, _source_dir, main = _collect_files(root, config, state, args.no_assets)
-    if args.ast or args.compile is not None:
+    if args.ast or args.compile is not None or args.encrypt:
         _check_sources(files)
     compile_info = None
     package_files: dict[str, bytes | Path] = dict(files)
     package_main = main.as_posix()
-    if args.compile is not None:
-        package_files, compile_info = _compile_sources(root, files, state, args.compile, args.reset, args.verbose)
+    compile_level = args.compile if args.compile is not None else (2 if args.encrypt else None)
+    if compile_level is not None:
+        package_files, compile_info = _compile_sources(
+            root, files, state, compile_level, args.reset, args.verbose,
+            protect_sources=bool(args.encrypt),
+        )
         if package_main.endswith(".py") and package_main[:-3] + ".pyc" in package_files:
             package_main = package_main[:-3] + ".pyc"
     elif args.reset:
@@ -360,8 +376,8 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
 
     build_info = None if args.no_info else {
         "version": __version__,
-        "compiled": args.compile is not None,
-        "python": "3.11" if args.compile is not None else f"{sys.version_info.major}.{sys.version_info.minor}",
+        "compiled": compile_level is not None,
+        "python": "3.11" if compile_level is not None else f"{sys.version_info.major}.{sys.version_info.minor}",
     }
     if compile_info:
         build_info.update({"optimize": compile_info["level"]})
@@ -372,6 +388,16 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
         build_info = build_info or {}
         build_info["client"] = args.static_client[0]
     manifest = _manifest(config, package_main, build_info)
+    if args.encrypt:
+        method = args.encrypt[0]
+        source_count = sum(1 for name in files if name.endswith(".py"))
+        manifest.setdefault("devgram_builder", {})["protected_sources"] = {
+            "format": "aes-zip-v1",
+            "method": method,
+            "path": PROTECTED_SOURCES_PATH,
+            "files": source_count,
+        }
+        package_files[PROTECTED_SOURCES_PATH] = _protected_sources(files, args.encrypt)
     _validate_wheels(manifest, package_files)
 
     if not args.no_folder:
@@ -390,7 +416,7 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".tmp")
     try:
-        with _open_archive(temp, args.encrypt) as archive:
+        with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name in sorted(package_files):
                 path = PurePosixPath(name)
                 if path.is_absolute() or ".." in path.parts or name.startswith("/"):
@@ -414,7 +440,7 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
         if compile_info:
             print(f"Python 3.11: {compile_info['compiled']} скомпилировано, {compile_info['cached']} из кэша")
         if args.encrypt:
-            print(f"Шифрование: {args.encrypt[0]}")
+            print(f"Защита исходников: {args.encrypt[0]} (установка без пароля)")
     return output
 
 
@@ -622,7 +648,7 @@ def _adb_forward() -> None:
     subprocess.run(["adb", "forward", f"tcp:{DEV_SERVER_PORT}", f"tcp:{DEV_SERVER_PORT}"], check=True)
 
 
-def _upload(path: Path, token: str, package_password: str = "") -> str:
+def _upload(path: Path, token: str) -> str:
     boundary = "----DevGram" + uuid.uuid4().hex
     payload = (
         f"--{boundary}\r\n".encode("ascii")
@@ -632,8 +658,6 @@ def _upload(path: Path, token: str, package_password: str = "") -> str:
         + f"\r\n--{boundary}--\r\n".encode("ascii")
     )
     headers = {"X-DevGram-Token": token, "Content-Type": f"multipart/form-data; boundary={boundary}"}
-    if package_password:
-        headers["X-DevGram-Package-Password"] = package_password
     request = urllib.request.Request(
         f"http://127.0.0.1:{DEV_SERVER_PORT}/upload",
         data=payload,
@@ -661,8 +685,7 @@ def upload(args: argparse.Namespace) -> None:
         raise BuilderError(f"архив не найден: {archive}")
     if not args.no_forward:
         _adb_forward()
-    package_password = args.package_password or os.environ.get("DEVGRAM_PLUGIN_PASSWORD", "")
-    print(_upload(archive, token, package_password))
+    print(_upload(archive, token))
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -691,7 +714,7 @@ def make_parser() -> argparse.ArgumentParser:
     build.add_argument("-sv", "--static-version", nargs="+", metavar=("VERSION", "APPEND"))
     build.add_argument("-sc", "--static-client", nargs="+", metavar=("PACKAGE", "NAME"))
     build.add_argument("-p", "--encrypt", nargs=2, metavar=("METHOD", "PASSWORD"),
-                       help="зашифровать архив: aes-128, aes-192 или aes-256")
+                       help="защитить исходники: aes-128, aes-192 или aes-256; установка без пароля")
     modes = build.add_mutually_exclusive_group()
     modes.add_argument("-a", "--ast", action="store_true", help="проверить синтаксис Python")
     modes.add_argument("-c", "--compile", nargs="?", type=int, choices=(0, 1, 2), const=1,
@@ -726,8 +749,6 @@ def make_parser() -> argparse.ArgumentParser:
     up = commands.add_parser("upload", help="собрать и загрузить через Dev Server")
     up.add_argument("archive", nargs="?", help="готовый .dgplugin; без него проект будет собран")
     up.add_argument("--token", help="токен Dev Server (или DEVGRAM_TOKEN)")
-    up.add_argument("--package-password",
-                    help="пароль зашифрованного пакета (или DEVGRAM_PLUGIN_PASSWORD)")
     up.add_argument("--no-forward", action="store_true", help="не выполнять adb forward")
     up.add_argument("-v", "--verbose", action="store_true")
     up.set_defaults(handler=upload)

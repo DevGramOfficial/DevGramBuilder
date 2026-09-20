@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -82,7 +83,7 @@ class BuilderTests(unittest.TestCase):
             with WorkingDirectory(root), self.assertRaises(BuilderError):
                 build_project(build_args(Path(temporary) / "broken.dgplugin"), quiet=True)
 
-    def test_aes_encrypted_build_requires_password_to_read(self):
+    def test_aes_protects_sources_but_package_installs_without_password(self):
         import pyzipper
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,12 +95,18 @@ class BuilderTests(unittest.TestCase):
             with WorkingDirectory(root):
                 build_project(args, quiet=True)
             with zipfile.ZipFile(output) as archive:
-                with self.assertRaises((NotImplementedError, RuntimeError)):
-                    archive.read("manifest.json")
-            with pyzipper.AESZipFile(output) as archive:
-                archive.setpassword(b"correct-password")
                 manifest = json.loads(archive.read("manifest.json"))
                 self.assertEqual(manifest["id"], "devgram.test")
+                self.assertEqual(manifest["main"], "main.pyc")
+                self.assertIn("main.pyc", archive.namelist())
+                self.assertNotIn("main.py", archive.namelist())
+                protected = archive.read(".devgram/protected-sources.zip")
+            with pyzipper.AESZipFile(io.BytesIO(protected)) as archive:
+                with self.assertRaises(RuntimeError):
+                    archive.read("main.py")
+                archive.setpassword(b"correct-password")
+                source = archive.read("main.py").decode("utf-8")
+                self.assertIn("class Plugin(BasePlugin)", source)
 
     def test_encryption_rejects_short_password(self):
         with tempfile.TemporaryDirectory() as temporary:
