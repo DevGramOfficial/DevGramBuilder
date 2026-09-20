@@ -93,7 +93,12 @@ class BuilderTests(unittest.TestCase):
             args = build_args(output)
             args.encrypt = ["aes-256", "correct-password"]
             with WorkingDirectory(root):
-                build_project(args, quiet=True)
+                try:
+                    build_project(args, quiet=True)
+                except BuilderError as error:
+                    if "Python 3.11" in str(error):
+                        self.skipTest(str(error))
+                    raise
             with zipfile.ZipFile(output) as archive:
                 manifest = json.loads(archive.read("manifest.json"))
                 self.assertEqual(manifest["id"], "devgram.test")
