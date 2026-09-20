@@ -30,10 +30,10 @@ def new_args(directory):
     )
 
 
-def build_args(output, compile_level=None):
+def build_args(output):
     return argparse.Namespace(
-        no_assets=False, no_folder=True, verbose=False, reset=False,
-        ast=compile_level is None, compile=compile_level, no_info=False,
+        no_assets=False, no_folder=True, verbose=False,
+        ast=True, no_info=False,
         static_version=None, static_client=None, output=str(output),
     )
 
@@ -55,24 +55,7 @@ class BuilderTests(unittest.TestCase):
                 self.assertEqual(manifest["id"], "devgram.test")
                 self.assertEqual(manifest["main"], "main.py")
                 self.assertIn("locales/ru.json", archive.namelist())
-
-    def test_compiled_build_uses_python_311_entrypoint(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "plugin"
-            new_project(new_args(root))
-            output = Path(temporary) / "compiled.dgplugin"
-            with WorkingDirectory(root):
-                try:
-                    build_project(build_args(output, 2), quiet=True)
-                except BuilderError as error:
-                    if "Python 3.11" in str(error):
-                        self.skipTest(str(error))
-                    raise
-            with zipfile.ZipFile(output) as archive:
-                manifest = json.loads(archive.read("manifest.json"))
-                self.assertEqual(manifest["main"], "main.pyc")
-                self.assertIn("main.pyc", archive.namelist())
-                self.assertNotIn("main.py", archive.namelist())
+                self.assertFalse(any(name.endswith((".pyc", ".pyo")) for name in archive.namelist()))
 
     def test_ast_validation_rejects_broken_source(self):
         with tempfile.TemporaryDirectory() as temporary:
