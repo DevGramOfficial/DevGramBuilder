@@ -34,7 +34,7 @@ def build_args(output, compile_level=None):
     return argparse.Namespace(
         no_assets=False, no_folder=True, verbose=False, reset=False,
         ast=compile_level is None, compile=compile_level, no_info=False,
-        static_version=None, static_client=None, output=str(output),
+        static_version=None, static_client=None, encrypt=None, output=str(output),
     )
 
 
@@ -81,6 +81,34 @@ class BuilderTests(unittest.TestCase):
             (root / "src" / "main.py").write_text("def broken(:\n", "utf-8")
             with WorkingDirectory(root), self.assertRaises(BuilderError):
                 build_project(build_args(Path(temporary) / "broken.dgplugin"), quiet=True)
+
+    def test_aes_encrypted_build_requires_password_to_read(self):
+        import pyzipper
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "plugin"
+            new_project(new_args(root))
+            output = Path(temporary) / "encrypted.dgplugin"
+            args = build_args(output)
+            args.encrypt = ["aes-256", "correct-password"]
+            with WorkingDirectory(root):
+                build_project(args, quiet=True)
+            with zipfile.ZipFile(output) as archive:
+                with self.assertRaises((NotImplementedError, RuntimeError)):
+                    archive.read("manifest.json")
+            with pyzipper.AESZipFile(output) as archive:
+                archive.setpassword(b"correct-password")
+                manifest = json.loads(archive.read("manifest.json"))
+                self.assertEqual(manifest["id"], "devgram.test")
+
+    def test_encryption_rejects_short_password(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "plugin"
+            new_project(new_args(root))
+            args = build_args(Path(temporary) / "encrypted.dgplugin")
+            args.encrypt = ["aes-256", "short"]
+            with WorkingDirectory(root), self.assertRaises(BuilderError):
+                build_project(args, quiet=True)
 
 
 if __name__ == "__main__":

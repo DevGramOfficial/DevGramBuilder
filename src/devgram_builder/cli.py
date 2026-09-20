@@ -308,10 +308,30 @@ def _validate_wheels(manifest: dict, files: dict[str, bytes | Path]) -> None:
 
 
 def _zip_write(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
-    info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    info_class = getattr(archive, "zipinfo_cls", zipfile.ZipInfo)
+    info = info_class(name, (1980, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = 0o100644 << 16
     archive.writestr(info, data)
+
+
+def _open_archive(path: Path, encryption: list[str] | tuple[str, str] | None):
+    if not encryption:
+        return zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED)
+    method, password = encryption
+    strengths = {"aes-128": 128, "aes-192": 192, "aes-256": 256}
+    if method not in strengths:
+        raise BuilderError("метод шифрования: aes-128, aes-192 или aes-256")
+    if len(password) < 8:
+        raise BuilderError("пароль шифрования должен содержать минимум 8 символов")
+    try:
+        import pyzipper
+    except ImportError as error:
+        raise BuilderError("для шифрования установите pyzipper: pip install pyzipper") from error
+    archive = pyzipper.AESZipFile(path, "w", compression=pyzipper.ZIP_DEFLATED)
+    archive.setpassword(password.encode("utf-8"))
+    archive.setencryption(pyzipper.WZ_AES, nbits=strengths[method])
+    return archive
 
 
 def _increment_stat(root: Path, key: str) -> None:
@@ -370,7 +390,7 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".tmp")
     try:
-        with zipfile.ZipFile(temp, "w") as archive:
+        with _open_archive(temp, args.encrypt) as archive:
             for name in sorted(package_files):
                 path = PurePosixPath(name)
                 if path.is_absolute() or ".." in path.parts or name.startswith("/"):
@@ -393,6 +413,8 @@ def build_project(args: argparse.Namespace, quiet: bool = False) -> Path:
         print(f"Файлов: {len(package_files)}, размер: {output.stat().st_size} байт")
         if compile_info:
             print(f"Python 3.11: {compile_info['compiled']} скомпилировано, {compile_info['cached']} из кэша")
+        if args.encrypt:
+            print(f"Шифрование: {args.encrypt[0]}")
     return output
 
 
@@ -600,7 +622,7 @@ def _adb_forward() -> None:
     subprocess.run(["adb", "forward", f"tcp:{DEV_SERVER_PORT}", f"tcp:{DEV_SERVER_PORT}"], check=True)
 
 
-def _upload(path: Path, token: str) -> str:
+def _upload(path: Path, token: str, package_password: str = "") -> str:
     boundary = "----DevGram" + uuid.uuid4().hex
     payload = (
         f"--{boundary}\r\n".encode("ascii")
@@ -609,10 +631,13 @@ def _upload(path: Path, token: str) -> str:
         + path.read_bytes()
         + f"\r\n--{boundary}--\r\n".encode("ascii")
     )
+    headers = {"X-DevGram-Token": token, "Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if package_password:
+        headers["X-DevGram-Package-Password"] = package_password
     request = urllib.request.Request(
         f"http://127.0.0.1:{DEV_SERVER_PORT}/upload",
         data=payload,
-        headers={"X-DevGram-Token": token, "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -629,14 +654,15 @@ def upload(args: argparse.Namespace) -> None:
         build_args = argparse.Namespace(
             no_assets=False, no_folder=True, verbose=args.verbose, reset=False,
             ast=True, compile=None, no_info=False, static_version=None,
-            static_client=None, output=None,
+            static_client=None, encrypt=None, output=None,
         )
         archive = build_project(build_args)
     if not archive.is_file() or archive.suffix != ".dgplugin":
         raise BuilderError(f"архив не найден: {archive}")
     if not args.no_forward:
         _adb_forward()
-    print(_upload(archive, token))
+    package_password = args.package_password or os.environ.get("DEVGRAM_PLUGIN_PASSWORD", "")
+    print(_upload(archive, token, package_password))
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -664,6 +690,8 @@ def make_parser() -> argparse.ArgumentParser:
     build.add_argument("-ni", "--no-info", action="store_true", help="не добавлять сведения о Builder")
     build.add_argument("-sv", "--static-version", nargs="+", metavar=("VERSION", "APPEND"))
     build.add_argument("-sc", "--static-client", nargs="+", metavar=("PACKAGE", "NAME"))
+    build.add_argument("-p", "--encrypt", nargs=2, metavar=("METHOD", "PASSWORD"),
+                       help="зашифровать архив: aes-128, aes-192 или aes-256")
     modes = build.add_mutually_exclusive_group()
     modes.add_argument("-a", "--ast", action="store_true", help="проверить синтаксис Python")
     modes.add_argument("-c", "--compile", nargs="?", type=int, choices=(0, 1, 2), const=1,
@@ -698,6 +726,8 @@ def make_parser() -> argparse.ArgumentParser:
     up = commands.add_parser("upload", help="собрать и загрузить через Dev Server")
     up.add_argument("archive", nargs="?", help="готовый .dgplugin; без него проект будет собран")
     up.add_argument("--token", help="токен Dev Server (или DEVGRAM_TOKEN)")
+    up.add_argument("--package-password",
+                    help="пароль зашифрованного пакета (или DEVGRAM_PLUGIN_PASSWORD)")
     up.add_argument("--no-forward", action="store_true", help="не выполнять adb forward")
     up.add_argument("-v", "--verbose", action="store_true")
     up.set_defaults(handler=upload)
